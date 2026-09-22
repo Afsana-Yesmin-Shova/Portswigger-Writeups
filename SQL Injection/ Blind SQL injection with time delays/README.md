@@ -1,278 +1,129 @@
 # Time-Based Blind SQL Injection
 
-## PortSwigger Web Security Academy
-
-**Category:** SQL Injection  
-**Lab:** Time-based blind SQL injection  
-**Status:** ✅ Solved
+**Lab:** Time-based blind SQL injection
+**Status:** Solved ✅
 
 ---
 
-## Lab Description
+## What makes this one different
 
-This lab demonstrates a **Time-Based Blind SQL Injection** vulnerability.
+Most of the labs so far give you something to look at — an error message, an extra row in the results, some kind of visible feedback. This one gives you nothing. The app takes user input, drops it straight into a query without sanitizing it, but never actually shows you the results or any errors.
 
-The application processes user-controlled input without properly parameterizing or sanitizing it.
+So instead of reading data back, we have to *time* the database. If we can make it pause for a few seconds on command, that pause itself becomes the signal — no output needed.
 
-Unlike normal SQL injection, the application does not directly return useful database information in the response.
+**Goal:** confirm the injection by making the server visibly hang for ~20 seconds.
 
-Instead, a time-delay function can be injected into the SQL query.
+## Where the bug lives
 
-If the SQL payload is successfully executed, the server response is delayed by a noticeable amount of time.
-
-This difference in response time can be used as a signal to confirm SQL injection and, in more advanced scenarios, extract information from the database.
-
----
-
-## Objective
-
-Identify and exploit the time-based blind SQL injection vulnerability by injecting a database sleep function and observing the resulting delay in the server response.
-
----
-
-# Vulnerability Details
-
-The vulnerability occurs because user-controlled input is incorporated into a backend SQL query without proper parameterization.
-
-A vulnerable query can be conceptually represented as:
+Somewhere on the backend, there's a query roughly like:
 
 ```sql
 SELECT *
 FROM users
 WHERE tracking_id = '<user_input>'
+```
 
-If the input is injectable, an attacker can modify the query and introduce a database time-delay function.
+Since that input isn't parameterized, we can break out of the string and add our own SQL — including a call to the database's sleep function.
 
-For example, a SLEEP() function can force the database to pause execution.
+## Working through it
 
-Solution
-Step 1: Capture the Request
+**1. Grab a request**
 
-First, open the lab and interact with the application normally.
+Browse the app like a normal user, catch a request in Burp, and figure out which parameter or cookie is carrying our input. Send it to Repeater — this whole exploit is basically "change payload, resend, check the clock," so Repeater is where we'll live.
 
-Use Burp Suite to intercept the request.
+**2. Get a baseline first**
 
-Identify the parameter or cookie containing user-controlled input.
+Before touching anything, fire off the unmodified request a couple of times and note how fast it comes back. You need this baseline — without it, a slow response could just be network noise instead of proof the injection worked.
 
-Send the request to:
+**3. Inject the delay**
 
-Burp Suite → Repeater
+Swap the parameter for a payload built around `SLEEP()`:
 
-This allows the request to be modified and tested repeatedly.
-
-Step 2: Establish the Normal Response Time
-
-Before testing the injection, send the original request several times.
-
-The normal request should return relatively quickly.
-
-For example:
-
-Normal request → Fast response
-
-This provides a baseline for comparison.
-
-Step 3: Inject a Time Delay
-
-Modify the vulnerable parameter and inject a SQL time-delay payload.
-
-The payload used in the write-up is conceptually based on:
-
+```
 ' || (SELECT FROM (SELECT(SLEEP(20)))a) || '
+```
 
-The purpose of the payload is to execute:
+The exact syntax shifts depending on the database engine and exactly where in the query your input lands, but the core of it is always the same: get `SLEEP(20)` to actually execute.
 
-SLEEP(20)
+**4. Watch the clock**
 
-which instructs the database to pause execution for approximately 20 seconds.
+Send it and compare against your baseline:
 
-The exact syntax can vary depending on the database engine and the context in which the parameter is inserted.
+- **Normal request** → comes back fast, like always
+- **Injected request** → hangs for roughly 20 seconds before responding
 
-Step 4: Observe the Response
+That gap is all the confirmation you need. The database executed our injected code — we just can't see any output from it, only feel the delay.
 
-Send the modified request through Burp Suite Repeater.
+## The payload
 
-Compare the response time with the original request.
-
-Normal Request
-Fast response
-Injected Request
-Approximately 20-second delay
-
-The significant delay indicates that the database executed the injected time-delay function.
-
-Behavior Observed
-
-The behavior can be summarized as:
-
-Normal input
-     ↓
-Fast response
-
-Injected SQL payload
-     ↓
-Database executes SLEEP(20)
-     ↓
-Server waits approximately 20 seconds
-     ↓
-Delayed response
-
-This confirms the presence of a Time-Based Blind SQL Injection vulnerability.
-
-Payload
-
-The payload used for testing was:
-
+```
 ' || (SELECT FROM (SELECT(SLEEP(20)))a) || '
+```
 
-The important component is:
+The part that actually matters is `SLEEP(20)` — everything else is just scaffolding to get that function call to execute inside the existing query.
 
-SLEEP(20)
+## Why timing works as a signal at all
 
-which introduces an approximately 20-second delay when executed.
+The whole point of blind SQLi is that you don't get to see query results directly, so you need some other channel to smuggle information out through. Time is a perfectly good one:
 
-Why This Works
+- Condition is false → no delay → fast response
+- Condition is true → `SLEEP()` fires → noticeable delay
 
-Time-based blind SQL injection relies on the difference between two response times.
+Once you can reliably turn a true/false condition into "fast" or "slow," you've got a working oracle. That's really all blind SQLi is — repeatedly asking yes/no questions and reading the answer off a stopwatch instead of the page content.
 
-The application does not need to display database results.
+## Taking it further: conditional sleeps
 
-Instead, the attacker uses execution time as a signal.
+The lab itself just confirms the vulnerability exists, but the same idea scales up into full data extraction using conditional logic:
 
-For example:
-
-Condition is FALSE
-        ↓
-No delay
-        ↓
-Fast response
-
-while:
-
-Condition is TRUE
-        ↓
-SLEEP(20) executes
-        ↓
-Approximately 20-second delay
-
-Therefore, the attacker can determine whether a SQL condition is true by measuring the server's response time.
-
-Time-Based Blind SQLi Concept
-
-A more advanced attack can use conditional logic.
-
-Conceptually:
-
+```
 IF(condition, SLEEP(5), 0)
+```
 
-If the condition is true:
+True → 5-second delay. False → nothing, response comes back normal speed. Ask "is the first character of the password 'a'?" — delay means yes, no delay means no. Repeat that across every character and every possible value, and you can reconstruct a password one character at a time without ever seeing a single byte of actual data in the response. Slow, but completely mechanical — which is exactly why it's usually automated with a tool like sqlmap in practice.
 
-SLEEP(5)
-    ↓
-5-second delay
+## Real-world impact
 
-If the condition is false:
+Once you've got a working time-based oracle, what you can do with it depends heavily on the database's privileges and how the app is wired up behind the scenes, but in general it opens the door to:
 
-No sleep
-    ↓
-Normal response
+- Pulling data out of the database character by character
+- Confirming or ruling out specific values (usernames, table names, etc.)
+- Extracting credentials given enough time and automation
+- Depending on privileges, possibly writing to the database too — not just reading
 
-This can theoretically be used to extract information one bit or character at a time.
+## Tools used
 
-For example:
+- Burp Suite (Proxy + Repeater)
+- Browser
 
-Is the first character of the password 'a'?
+## Takeaways
 
-If the answer is TRUE:
+- Blind SQLi doesn't need visible output to be exploitable — timing alone is enough of a side channel.
+- Always establish a baseline response time before trusting a delay as a signal.
+- `SLEEP()` (or its equivalent) is the workhorse function here — get it to fire reliably and you've got a working boolean oracle.
+- This technique scales into full data extraction with conditional logic, just slowly and usually via automation.
+- Same fix, every time: parameterized queries. No amount of clever filtering beats not concatenating input into SQL in the first place.
 
-Delay occurs
+## Fixing it
 
-If the answer is FALSE:
+Parameterized queries / prepared statements are the actual fix. Don't build SQL with string concatenation:
 
-No delay
+```sql
+SELECT * FROM users WHERE id = '<user_input>'
+```
 
-Repeating this process can allow database information to be extracted even when the application does not display query results.
+Use a bound parameter instead:
 
-Burp Suite Workflow
-Browser
-   ↓
-Capture HTTP Request
-   ↓
-Identify User-Controlled Parameter
-   ↓
-Send Request to Burp Repeater
-   ↓
-Measure Normal Response Time
-   ↓
-Inject Time-Delay Payload
-   ↓
-Send Request
-   ↓
-Observe ~20 Second Delay
-   ↓
-Confirm Time-Based Blind SQL Injection
-Impact
+```sql
+SELECT * FROM users WHERE id = ?
+```
 
-A successful time-based blind SQL injection vulnerability can allow an attacker to:
+Worth pairing with:
 
-Extract information from the database.
-Determine database values through timing differences.
-Infer usernames and other sensitive information.
-Potentially extract passwords.
-Interact with or modify backend data depending on the SQL injection context.
-Potentially escalate the attack toward broader database compromise.
+- Validating user-controlled input wherever it makes sense
+- Running database accounts with the least privilege they can get away with
+- Not leaking detailed DB errors to clients
+- Keeping an eye on unusual response-time patterns, since that's exactly what this attack abuses
 
-The actual impact depends on the database privileges and the application's backend configuration.
+---
 
-Tools Used
-Burp Suite
-Burp Suite Repeater
-Web Browser
-PortSwigger Web Security Academy
-Key Takeaways
-Blind SQL injection does not always return database results directly.
-Response timing can be used as a side channel to infer SQL query results.
-Database functions such as SLEEP() can be used to introduce measurable delays.
-Establishing a baseline response time is important when testing time-based vulnerabilities.
-Time-based SQL injection can potentially be automated to extract information character by character.
-Parameterized queries and prepared statements are the primary defenses against SQL injection.
-Remediation
-
-The primary defense is to use parameterized queries / prepared statements.
-
-Instead of constructing SQL statements using string concatenation:
-
-SELECT *
-FROM users
-WHERE id = '<user_input>'
-
-the application should use a parameterized query:
-
-SELECT *
-FROM users
-WHERE id = ?
-
-Additional defensive measures include:
-
-Properly parameterize all database queries.
-Avoid concatenating user input into SQL statements.
-Validate user-controlled input where appropriate.
-Use least-privilege database accounts.
-Avoid exposing detailed database errors.
-Monitor unusual database response-time patterns.
-Consider additional server-side protections against SQL injection.
-Lab Status
-
-Status: ✅ Solved
-
-Vulnerability: Time-Based Blind SQL Injection
-
-Technique: SQL Time Delay
-
-Payload: SLEEP(20)
-
-Observed Effect: Approximately 20-second server response delay
-
-Disclaimer
-
-This write-up was created for educational and authorized security testing purposes using the PortSwigger Web Security Academy lab environment.
+*Solved as part of the PortSwigger Web Security Academy — for learning/authorized testing only. Don't run this against anything you don't have permission to test.*
