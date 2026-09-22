@@ -1,324 +1,164 @@
-# Visible Error-Based SQL Injection
+# Visible Error-Based SQL Injection — PortSwigger Lab Walkthrough
 
-## PortSwigger Web Security Academy
-
-**Category:** SQL Injection  
-**Lab:** Visible error-based SQL injection  
-**Difficulty:** Practitioner  
-**Status:** ✅ Solved
+**Lab:** Visible error-based SQL injection
+**Difficulty:** Practitioner
+**Status:** Solved ✅
 
 ---
 
-## Lab Description
+## What this lab is about
 
-This lab contains a SQL injection vulnerability in a tracking cookie.
+This one's a classic error-based SQLi. The app sticks a `TrackingId` cookie straight into a SQL query without sanitizing it, and — even better for us — it doesn't bother hiding its database errors. So instead of guessing blind, we can just make the query blow up in a way that leaks data back to us in the error message itself.
 
-The application uses the `TrackingId` cookie in a SQL query. The application also returns detailed database error messages when the SQL query is malformed.
+Goal: grab the administrator's password and log in.
 
-By intentionally causing SQL errors, sensitive information from the database can be included in the error message.
+## The bug, in plain terms
 
-The objective is to exploit this behavior and retrieve the administrator password.
-
----
-
-## Objective
-
-Exploit the visible error-based SQL injection vulnerability to retrieve the password of the `administrator` user and log in to the administrator account.
-
----
-
-## Vulnerability
-
-The application uses the `TrackingId` cookie directly in a SQL query without properly parameterizing the input.
-
-A query can be conceptually represented as:
+Somewhere on the backend the query looks roughly like this:
 
 ```sql
 SELECT TrackingId
 FROM TrackedUsers
 WHERE TrackingId = '<TrackingId>'
+```
 
-Because the cookie value is controlled by the client, SQL syntax can be injected into the query.
+Since `TrackingId` comes straight from a cookie we control, and the app happily prints raw SQL errors to the page, we've got everything we need for error-based extraction.
 
-The application also exposes verbose SQL error messages.
+## Walking through the exploit
 
-This combination allows an attacker to inject a query that deliberately causes a database conversion error and exposes the result of a subquery inside the error message.
+**1. Find the injection point**
 
-Solution
-Step 1: Identify the TrackingId Cookie
+Fire up Burp, browse the app, and grab a request. You'll spot a cookie that looks something like:
 
-First, open the PortSwigger lab and browse the application.
-
-Intercept a request using Burp Suite.
-
-The request contains a cookie similar to:
-
+```
 Cookie: TrackingId=xyz
+```
 
-The TrackingId cookie is the injection point.
+That's our target.
 
-Step 2: Send the Request to Burp Repeater
+**2. Drop it into Repeater**
 
-Send the request to Burp Suite Repeater.
+Send that request over to Repeater so we can mess with the cookie value and watch how the server reacts without re-browsing every time.
 
-This allows the cookie value to be modified and the server response to be inspected.
+**3. Break it on purpose**
 
-The original cookie looks similar to:
+Tack a single quote onto the value:
 
-TrackingId=xyz
-Step 3: Trigger a SQL Error
-
-Modify the cookie by adding a single quote:
-
+```
 xyz'
+```
 
-Send the request.
+Send it. If the app throws a SQL error back at you, congrats — you've confirmed the input isn't being sanitized.
 
-The application returns an SQL error.
+**4. Tidy up the query**
 
-This confirms that the TrackingId value is being incorporated into a SQL query.
+Comment out whatever comes after our injection so the rest of the original query doesn't get in the way:
 
-The error message also provides information about the SQL query being executed.
-
-Step 4: Confirm the SQL Injection
-
-Add a comment sequence to terminate the query:
-
+```
 xyz'--
+```
 
-The -- comments out the remainder of the SQL statement.
+Now we've got a clean slate to build on.
 
-The request can now be used to construct additional SQL expressions.
+**5. Prove we can trigger a controlled error**
 
-Exploiting the Error Message
+Here's the fun part. We use `CAST()` to force a type conversion that's guaranteed to fail — and Postgres/whatever's under the hood will often print the offending value right there in the error:
 
-The important part of this vulnerability is that we can intentionally cause a data-type conversion error.
-
-The CAST() function can be used to convert a value from one data type to another.
-
-For example:
-
-CAST('test' AS int)
-
-attempts to convert the string test into an integer.
-
-This causes an error because test is not a valid integer.
-
-A database error may therefore contain the value that was supplied to CAST().
-
-This behavior can be abused to make the database reveal information.
-
-Step 5: Confirm the Database Behavior
-
-A payload can be constructed using:
-
+```
 ' AND 1=CAST((SELECT 'a') AS int)--
+```
 
-Conceptually, the query becomes:
+The full query effectively becomes:
 
+```sql
 SELECT TrackingId
 FROM TrackedUsers
 WHERE TrackingId = ''
 AND 1=CAST((SELECT 'a') AS int)--
+```
 
-The database attempts to convert the value a to an integer.
+Trying to cast the letter `a` into an integer fails, and the resulting error message hands back the value it choked on. That's our proof of concept.
 
-This generates an error containing the supplied value.
+**6. Pull something real out of the `users` table**
 
-Step 6: Identify the Users Table
+Now swap the hardcoded `'a'` for an actual subquery:
 
-Next, query the users table.
-
-The following payload can be used:
-
+```
 ' AND 1=CAST((SELECT username FROM users LIMIT 1) AS int)--
+```
 
-The subquery:
+Same idea — the database tries to convert a username into an int, fails, and spits the username back out in the error. In this lab that comes back as `administrator`, confirming the table and account exist.
 
-SELECT username
-FROM users
-LIMIT 1
+**7. Go after the password**
 
-returns the username of the first user.
+Same trick, different column:
 
-The result is then passed to:
-
-CAST(... AS int)
-
-which causes a conversion error.
-
-The error message reveals the username.
-
-In this lab, the retrieved username is:
-
-administrator
-
-This confirms that the users table exists and contains the administrator account.
-
-Step 7: Extract the Administrator Password
-
-Now that the users table and administrator account have been identified, the same technique can be used to retrieve the password.
-
-Use:
-
+```
 ' AND 1=CAST((SELECT password FROM users LIMIT 1) AS int)--
+```
 
-The database attempts to convert the administrator password into an integer.
+The password obviously isn't a valid integer either, so it fails the same way — and the error message hands it to us in plaintext.
 
-Because the password is not a valid integer, the database generates an error.
+**8. Log in**
 
-The error message contains the password value.
+Head to the login page, punch in `administrator` and the password you just pulled out of the error message, and you're in. Lab solved.
 
-The password can then be copied and used on the application's login page.
+## Payload cheat sheet
 
-Step 8: Log In as Administrator
+| Purpose | Payload |
+|---|---|
+| Trigger a basic error | `'` |
+| Close out the query cleanly | `'--` |
+| Confirm CAST-based error injection works | `' AND 1=CAST((SELECT 'a') AS int)--` |
+| Pull the admin username | `' AND 1=CAST((SELECT username FROM users LIMIT 1) AS int)--` |
+| Pull the admin password | `' AND 1=CAST((SELECT password FROM users LIMIT 1) AS int)--` |
 
-Navigate to the login page.
+## Why this actually works
 
-Enter:
+Three things have to line up for this attack to land:
 
-Username: administrator
-Password: <retrieved password>
+1. User input (the cookie, here) flows straight into a SQL query.
+2. The app doesn't suppress its database error messages.
+3. Those errors happen to include the value that caused the failure.
 
-Submit the login form.
+Take any one of those away and the attack stops working. Parameterize the query, or just stop showing raw DB errors to users, and this whole chain falls apart.
 
-The credentials retrieved through the SQL error allow authentication as the administrator.
+**Quick example:** if the DB holds `username = administrator` and `password = secret123`, running `SELECT password FROM users LIMIT 1` returns `secret123`. Feed that into `CAST('secret123' AS int)` and you'll get something like:
 
-The lab is then marked as solved.
-
-Payloads Used
-Trigger SQL Error
-'
-Comment Out the Remaining Query
-'--
-Test Error-Based SQL Injection
-' AND 1=CAST((SELECT 'a') AS int)--
-Retrieve Username
-' AND 1=CAST((SELECT username FROM users LIMIT 1) AS int)--
-Retrieve Password
-' AND 1=CAST((SELECT password FROM users LIMIT 1) AS int)--
-How the Exploit Works
-
-The attack relies on three conditions:
-
-User-controlled input is included in a SQL query.
-The application returns detailed SQL error messages.
-The database error reveals the value involved in a failed type conversion.
-
-The basic attack flow is:
-
-TrackingId Cookie
-       ↓
-SQL Injection
-       ↓
-Subquery retrieves data
-       ↓
-CAST() attempts invalid conversion
-       ↓
-Database generates an error
-       ↓
-Error message contains the data
-       ↓
-Sensitive information is revealed
-Example
-
-Suppose the database contains:
-
-username = administrator
-password = secret123
-
-The following query:
-
-SELECT password FROM users LIMIT 1
-
-returns:
-
-secret123
-
-When the result is passed to:
-
-CAST('secret123' AS int)
-
-the database generates a conversion error.
-
-The error may contain:
-
+```
 invalid input syntax for type integer: "secret123"
+```
 
-Therefore, the password is exposed through the error message.
+And there's your password, sitting right there in the error.
 
-Burp Suite Workflow
-Browser
-   ↓
-Capture Request
-   ↓
-Identify TrackingId Cookie
-   ↓
-Send to Burp Repeater
-   ↓
-Trigger SQL Error
-   ↓
-Confirm SQL Injection
-   ↓
-Use CAST() to Trigger Conversion Error
-   ↓
-Query users Table
-   ↓
-Retrieve administrator Username
-   ↓
-Retrieve administrator Password
-   ↓
-Login as Administrator
-   ↓
-Lab Solved
-Tools Used
-Burp Suite
-Burp Suite Repeater
-Web Browser
-PortSwigger Web Security Academy
-Key Takeaways
-SQL injection can occur in HTTP cookies, not only URL parameters or form inputs.
-Verbose database errors can expose sensitive information.
-Error-based SQL injection can turn database errors into an information disclosure channel.
-The CAST() function can be abused to trigger type-conversion errors containing database values.
-Sensitive information such as usernames and passwords should never be exposed through database error messages.
-Applications should use parameterized queries or prepared statements to prevent SQL injection.
-Production applications should also avoid exposing detailed database errors to users.
-Remediation
+## Takeaways
 
-The primary defense against SQL injection is the use of parameterized queries or prepared statements.
+- SQL injection isn't limited to URL params or form fields — cookies are fair game too.
+- Verbose database errors are a real information-disclosure risk, not just a minor annoyance.
+- `CAST()` is a handy way to coerce the database into leaking data through a failed conversion.
+- Never let raw DB errors reach the client in production.
 
-Instead of constructing SQL queries using string concatenation:
+## How to actually fix this
 
-SELECT * FROM users
-WHERE username = '<user_input>'
+The real fix is parameterized queries / prepared statements — full stop. Don't build SQL with string concatenation:
 
-the application should use a parameterized query:
+```sql
+SELECT * FROM users WHERE username = '<user_input>'
+```
 
-SELECT * FROM users
-WHERE username = ?
+Use bound parameters instead:
 
-The application should also:
+```sql
+SELECT * FROM users WHERE username = ?
+```
 
-Avoid exposing database error messages to users.
-Log detailed errors internally.
-Return generic error messages to clients.
-Validate and handle user-controlled input appropriately.
-Apply the principle of least privilege to database accounts.
-Lab Status
+On top of that:
 
-Status: ✅ Solved
+- Never expose detailed database errors to end users — log them server-side instead.
+- Return generic, non-descriptive error messages to the client.
+- Validate and sanitize all user-controlled input.
+- Run the database account with the least privilege it can get away with.
 
-Vulnerability: Visible Error-Based SQL Injection
+---
 
-Injection Point: TrackingId cookie
-
-Technique: SQL error-based data extraction
-
-Impact: Sensitive database information disclosure
-
-Disclaimer
-
-This write-up was created for educational and authorized security testing purposes using the PortSwigger Web Security Academy lab environment.
-
-Do not use these techniques against systems without explicit authorization.
+*Solved as part of the PortSwigger Web Security Academy — for learning/authorized testing only. Don't point this at anything you don't have permission to test.*
